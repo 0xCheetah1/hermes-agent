@@ -358,7 +358,7 @@ async def _send_telegram(token, chat_id, message, media_files=None, thread_id=No
                          **notification_kwargs(resolve_notifications_mode(), notify)}
         # disable_web_page_preview is only valid for send_message, not media sends.
         text_kwargs = {**thread_kwargs, **({"disable_web_page_preview": True} if disable_link_previews else {})}
-        last_msg, warnings, _tg_caption = None, [], None
+        last_msg, warnings, _tg_caption, chunk_ids = None, [], None, []
         if message and not media_files:
             rich = await send_rich_standalone(bot, {**(extra or {}), "disable_link_previews": disable_link_previews},
                                               chat_id, message, thread_id=thread_id, notify=notify)
@@ -382,6 +382,7 @@ async def _send_telegram(token, chat_id, message, media_files=None, thread_id=No
             ]
         for chunk in chunks:
             last_msg = await _telegram_send_text_chunk(bot, int_chat_id, chunk, send_parse_mode, _has_html, text_kwargs)
+            chunk_ids.append(getattr(last_msg, "message_id", None))
         if album := _telegram_album_paths(media_files, force_document, _tg_caption):
             result = await send_album_standalone(bot, extra or {}, chat_id, album, thread_id=thread_id, notify=notify)
             detail = result.raw_response or {}
@@ -420,7 +421,9 @@ async def _send_telegram(token, chat_id, message, media_files=None, thread_id=No
         if last_msg is None:
             return {"error": _NO_DELIVERABLE, **({"warnings": warnings} if warnings else {})}
         return _success(chat_id, warnings, **({"message_id": str(last_msg.message_id)}
-                                                          if last_msg.message_id is not None else {}))
+                                                          if last_msg.message_id is not None else {}),
+                        **({"raw_response": {"message_ids": [str(m) for m in chunk_ids if m is not None]}}
+                           if len(chunk_ids) > 1 else {}))
     except ImportError:
         return {"error": "python-telegram-bot not installed. Run: "
                 f"{install_hint('telegram')}"}
