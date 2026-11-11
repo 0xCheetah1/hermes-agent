@@ -23,6 +23,7 @@ from agent.i18n import t
 from gateway.config import Platform
 from gateway.platforms.base import EphemeralReply
 from gateway.platforms.event import MessageEvent, MessageType, clean_attachment_filename
+from gateway.platforms.helpers import tag_safe_display_name
 from gateway.run_busy import approval_input_words
 from gateway.run_inbound_media import rehome_inbound_media
 from gateway.run_inbound_hooks import GatewayInboundHooksMixin
@@ -32,10 +33,7 @@ from gateway.run_inbound_unauthorized import (
     UnauthorizedOwnerNotifier, pairing_code_reply, pairing_profile_arg, pairing_rate_limited_reply,
     unauthorized_owner_hint,
 )
-from gateway.session import (
-    SessionSource, build_session_context, is_shared_multi_user_session,
-    neutralize_untrusted_inline_text,
-)
+from gateway.session import SessionSource, build_session_context, is_shared_multi_user_session
 from gateway.turn_lease import TurnLeaseTimeoutError
 from hermes_cli.observability.shared_metrics_busy import (
     note_busy_admitting, note_busy_outcome, settle_busy_arrival, stamp_busy_arrival)
@@ -1514,16 +1512,10 @@ class GatewayInboundMixin(GatewayInboundHooksMixin, GatewayInboundTranscriptionM
             thread_sessions_per_user=getattr(self.config, "thread_sessions_per_user", False),
         )
         if _is_shared_multi_user and source.user_name:
-            # Display names are attacker-influenceable: neutralize newlines/control chars or a
-            # hostile name masquerades as a fake markdown section (mirrors build_session_context_prompt).
-            _safe_user_name = neutralize_untrusted_inline_text(source.user_name)
-            # The prefix is structural: ``[`` ... ``]`` delimits the name, so a name holding
-            # brackets would end it early (``[Ann] Smith] ...``) or forge bracketed structure
-            # inside a gateway-built line (#127053). Strip the delimiter here, not in the
-            # helper (whose other call sites render names outside brackets), then re-collapse
-            # whitespace the removal may leave behind. Runs before the Slack branch so a
-            # name-supplied ``]`` can never displace the trusted ``<@id>`` mention span.
-            _safe_user_name = " ".join(_safe_user_name.replace("[", "").replace("]", "").split())
+            # Display names are attacker-influenceable: one inert line with the tag's own delimiters
+            # dropped, so a name can neither fake a markdown section nor end the [Name] prefix early,
+            # forge bracketed structure, or a second "| Slack user <@id>" span (#127053).
+            _safe_user_name = tag_safe_display_name(source.user_name)
             # Slack: expose the CURRENT speaker's verifiable `<@U...>` id so "mention me again" has a
             # trusted target (display names are ambiguous). user_id comes from the envelope, not user-editable.
             # See #17916.
