@@ -61,8 +61,9 @@ async def _send_one(adapter: Any, chat_id: str, url: str, alt: Optional[str], me
 
 
 async def _send_each(adapter: Any, chat_id: str, photos: list[tuple], metadata: Optional[dict], human_delay: float,
-                     failed: list) -> bool:
-    """One upload per photo (``send_image_file``'s photo -> document fallbacks); failures land in ``failed``."""
+                     failed: list, deferred: list) -> bool:
+    """One upload per photo (``send_image_file``'s photo -> document fallbacks); failures land in
+    ``failed``, and those a flood window deferred to a later re-upload also in ``deferred``."""
     delivered = False
     for photo_idx, (image_url, alt_text) in enumerate(photos):
         if human_delay > 0 and photo_idx > 0:
@@ -71,6 +72,8 @@ async def _send_each(adapter: Any, chat_id: str, photos: list[tuple], metadata: 
         delivered = delivered or result.success
         if not result.success:
             failed.append((_local_path(image_url) or image_url, result.error or "send failed"))
+            if isinstance(result.raw_response, dict) and result.raw_response.get("deferred_upload"):
+                deferred.append(image_url)  # flood control: re-uploaded later with its caption
     return delivered
 
 
@@ -155,12 +158,14 @@ async def send_photo_album(
     *, delivered: bool = False, per_photo_fallback: bool = True,
 ) -> SendResult:
     """Send ``(url, alt)`` photos as albums. ``success`` = at least one photo delivered or possibly
-    delivered; ``raw_response`` carries ``failed`` (``[(photo, error)]``), ``refused`` (when
+    delivered; ``raw_response`` carries ``failed`` (``[(photo, error)]``), ``deferred`` (the photo
+    URLs among them a flood window queued for a later re-upload, caption included), ``refused`` (when
     ``per_photo_fallback`` is off: the first refused chunk's photos and every later one, in order,
     for the caller to send its own way) and
     ``ambiguous`` (a chunk was sent but never confirmed) whenever any applies."""
     from plugins.platforms.telegram.adapter import _redact_telegram_error_text as redact
     failed: list[tuple[str, str]] = []
+    deferred: list[str] = []
     refused: list[tuple] = []
     ambiguous = False
     try:
@@ -192,7 +197,7 @@ async def send_photo_album(
                 logger.warning("[%s] send_media_group refused (chunk %d/%d), falling back to per-image: %s",
                                adapter.name, chunk_idx + 1, len(chunks), redact(err), exc_info=True)
         if per_photo_fallback:
-            delivered = await _send_each(adapter, chat_id, sent, metadata, human_delay, failed) or delivered
+            delivered = await _send_each(adapter, chat_id, sent, metadata, human_delay, failed, deferred) or delivered
         else:
             # The caller's per-file fallback runs after we return, so later albums would land
             # ahead of this chunk: hand back the rest of the batch too and keep the user's order.
@@ -200,9 +205,10 @@ async def send_photo_album(
             break
     if not chunks:  # no media-group support
         if per_photo_fallback:
-            delivered = await _send_each(adapter, chat_id, photos, metadata, human_delay, failed) or delivered
+            delivered = await _send_each(adapter, chat_id, photos, metadata, human_delay, failed, deferred) or delivered
         else:
             refused = list(photos)
-    detail = {"failed": failed, "refused": refused, "ambiguous": ambiguous} if failed or refused or ambiguous else None
+    detail = {"failed": failed, "deferred": deferred, "refused": refused, "ambiguous": ambiguous} \
+        if failed or refused or ambiguous else None
     error = None if delivered or refused else "all images failed to send" + (f": {failed[0][1]}" if failed else "")
     return SendResult(success=delivered, error=error, raw_response=detail)
